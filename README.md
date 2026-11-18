@@ -1,0 +1,117 @@
+# pgCustard collector
+
+A collector you can run close to your database, for gathering statistics and metadata to send to [pgCustard](https://pgcustard.com).
+
+## Requirements
+
+- The database added in pgCustard, and a token from its Collector tokens section.
+- A monitoring user with `pg_monitor`, and `pg_stat_statements` enabled for top queries. Our [setup guides](https://pgcustard.com/docs#setup-guides) cover the steps for each managed provider.
+- Outbound HTTPS from the collector to app.pgcustard.com, directly or through a [proxy](#settings).
+- About 1GB of memory, as a container limit or a small VM. The collector usually uses 150–250MB. CPU use is very low.
+
+## Run it
+
+Put the settings in a file, for example `collector.env`:
+
+```
+PGHOST=db.internal
+PGDATABASE=app
+PGUSER=pgcustard
+PGPASSWORD=your_password
+PGSSLMODE=verify-full
+PGSSLROOTCERT=/etc/pgcustard/root.crt
+PGCUSTARD_TOKEN=your_token
+```
+
+Then start the collector:
+
+```bash
+docker run -d --name pgcustard-collector --restart unless-stopped \
+  --env-file collector.env -v /etc/pgcustard:/etc/pgcustard:ro \
+  -v pgcustard-collector:/data quay.io/pgcustard/collector:0.1
+```
+
+`docker logs pgcustard-collector` should show something like:
+
+```
+INFO pgCustard collector 0.1.0 started, collecting from db.internal:5432/app every 30s and sending to https://app.pgcustard.com
+INFO collected in 812ms, 1 sent, 0 waiting
+```
+
+The collector logs a line per collection. Problems are logged once, and again when they clear. We use `WARN` when the collector can continue, and `ERROR` when it can’t.
+
+## Settings
+
+| Setting | |
+|---|---|
+| `PGHOST` | Required, a hostname or IP address (not a Unix socket) |
+| `PGPORT` | Defaults to 5432 |
+| `PGDATABASE` | Required |
+| `PGUSER` | Required |
+| `PGPASSWORD` | Or `PGPASSFILE`, the path to a [password file](https://www.postgresql.org/docs/current/libpq-pgpass.html) |
+| `PGSSLMODE` | Required: `verify-full` (our recommendation), `verify-ca`, `require`, or `disable` |
+| `PGSSLROOTCERT` | The certificate authority to trust: a file, or `amazon-rds` or `supabase` for their bundled certificates (without it, `verify-full` trusts the usual public authorities) |
+| `PGCUSTARD_TOKEN` | Or `PGCUSTARD_TOKEN_FILE`, the path to a file containing it |
+| `PGCUSTARD_LOG_LEVEL` | `info` (the default), `warn`, or `error` |
+| `HTTPS_PROXY` | A proxy to send through, as `host:port` or `http://host:port` |
+
+## What it sends
+
+- Database statistics and the Postgres version
+- Table and index statistics and definitions
+- Statistics and texts for top queries, from `pg_stat_statements`, with quoted values replaced by placeholders like `$1`
+
+What might still be sensitive:
+
+- Object names and definitions, including partial-index conditions
+- Comments and some (unquoted) numbers in query texts
+- The application, user, or prepared transaction ID holding back cleanup
+- The name of whichever database is closest to transaction ID wraparound
+- Errors from connecting and collecting, which can name hosts and users
+
+`print` collects once and prints the payload instead of sending it, and needs no token:
+
+```bash
+docker run --rm --env-file collector.env -v /etc/pgcustard:/etc/pgcustard:ro \
+  quay.io/pgcustard/collector:0.1 print > payload.json
+```
+
+It exits with status 1 if it couldn’t collect everything, so it also works as a quick connection check.
+
+To see what it would send over time, `dry-run` collects every 30s like `run`, but keeps the payloads in `/data/dry-run/payloads` instead of sending them.
+
+## If pgCustard can’t be reached
+
+Payloads wait in `/data` and are sent oldest first once the connection is working again. Payloads over 7 days old are deleted, and so are the oldest ones when they take up more than 1GB in total.
+
+## Development
+
+The collector is written in Clojure, and built and tested with [Leiningen](https://leiningen.org):
+
+```bash
+lein test
+```
+
+Tests that need a Postgres are skipped without one:
+
+```bash
+PGCUSTARD_TEST_POSTGRES_URL=postgresql://postgres@localhost/postgres lein test
+```
+
+To build the image:
+
+```bash
+docker build -t pgcustard-collector .
+```
+
+## Issues and pull requests
+
+Issues are welcome. We develop the collector alongside pgCustard and copy it here for each release, so we can’t merge pull requests as they are, but we can apply a change you suggest.
+
+## Security
+
+To report a security issue, please email security@pgcustard.com with steps to reproduce it, rather than opening an issue.
+
+## Licence
+
+Apache 2.0, see [LICENSE](LICENSE). The libraries the collector includes, and their licences, are listed in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).

@@ -1,0 +1,9 @@
+/target/
+/checkouts/
+pom.xml
+pom.xml.asc
+.lein-*
+.nrepl-port
+.cpcache/
+.clj-kondo/
+.lsp/.cache/
