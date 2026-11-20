@@ -295,3 +295,70 @@
          (:ignored-settings (runner/config {"PGSSLCERT" "/c.crt" "PGSSLKEY" "/c.key" "PGPASSFILE" "/p"
                                             "PGDATA" "/var/lib/postgresql/data" "PGAPPNAME" ""}
                                            :dry-run)))))
+
+(defn- url-config [url env]
+  (runner/config (assoc env "PGCUSTARD_DATABASE_URL" url) :print))
+
+(deftest a-database-url-sets-the-connection
+  (is (= {:host "db.example.com" :port "6543" :database "app" :user "pgcustard" :password "p@ss:w/r+d"
+          :sslmode "verify-full" :sslrootcert "system"}
+         (:connection (url-config "postgresql://pgcustard:p%40ss%3Aw%2Fr+d@db.example.com:6543/app?sslmode=verify-full&sslrootcert=system"
+                                  {}))))
+  (testing "the short scheme in any case, and an IPv6 host"
+    (is (= {:host "::1" :database "app" :user "u"}
+           (select-keys (:connection (url-config "POSTGRES://u@[::1]/app" {})) [:host :database :user]))))
+  (testing "an unescaped @ in the password"
+    (is (= "a@b" (:password (:connection (url-config "postgres://u:a@b@db.example.com/app" {}))))))
+  (testing "a blank URL is the same as none"
+    (is (= "env.example.com" (:host (:connection (url-config " " {"PGHOST" "env.example.com"})))))))
+
+(deftest settings-a-database-url-leaves-out-come-from-the-environment
+  (let [config (url-config "postgres://u:secret@db.example.com:5432/app" {"PGSSLMODE" "require"})]
+    (is (empty? (runner/config-problems config)))
+    (is (= "require" (:sslmode (:connection config))))
+    (is (= #{:host :port :database :user :password} (:from-database-url config)))
+    (testing "the start line names the database but not the password"
+      (is (str/includes? (#'runner/describe-start config) "db.example.com:5432/app"))
+      (is (not (str/includes? (#'runner/describe-start config) "secret"))))))
+
+(deftest a-setting-given-by-both-the-database-url-and-the-environment-stops-it
+  (let [config   (url-config "postgres://u@db.example.com/app?sslmode=require"
+                             {"PGHOST" "other.example.com" "PGSSLMODE" "require" "PGUSER" "" "PGPORT" "5432"})
+        problems (runner/config-problems config)]
+    (is (= [:host :sslmode] (:set-twice config)))
+    (testing "even when the two agree"
+      (is (= 2 (count problems))))
+    (doseq [[problem setting] (map vector problems ["PGHOST" "PGSSLMODE"])]
+      (is (str/includes? problem "PGCUSTARD_DATABASE_URL") problem)
+      (is (str/includes? problem setting) problem))))
+
+(deftest a-database-url-the-collector-cant-read-is-the-only-database-problem
+  (doseq [url ["jdbc:postgresql://db.example.com/app" "db.example.com:5432/app" "host=db.example.com dbname=app"]]
+    (let [config (url-config url {})]
+      (is (= :scheme (:database-url-issue config)) url)
+      (is (= 1 (count (runner/config-problems config))) url)
+      (is (str/includes? (first (runner/config-problems config)) "PGCUSTARD_DATABASE_URL") url))))
+
+(deftest a-bad-value-in-a-database-url-is-named-as-part-of-the-url
+  (let [problems (mapcat #(runner/config-problems (url-config % {}))
+                         ["postgres://u@not%20a%20host!/app?sslmode=require"
+                          "postgres://u@db.example.com:x/app?sslmode=require"
+                          "postgres://u@db.example.com/a%20b?sslmode=require"
+                          "postgres://u@db.example.com/app?sslmode=sometimes"
+                          "postgres://u@db.example.com/app?sslmode=require&sslrootcert="
+                          "postgres://u@db.example.com/app?sslmode=verify-full&sslrootcert=/no/such/host/file.crt"
+                          "postgres://u@db.example.com/app?sslmode=verify-ca"
+                          "postgres://u@db.example.com/app?sslmode=require&sslrootcert=system"])]
+    (is (= 8 (count problems)))
+    (doseq [problem problems]
+      (is (str/includes? problem "PGCUSTARD_DATABASE_URL") problem)
+      (is (not (re-find #"\bPG(HOST|PORT|DATABASE|SSLMODE)\b" problem)) problem)))
+  (testing "a setting the URL leaves out is still named as its variable"
+    (let [[problem] (runner/config-problems (url-config "postgres://u@db.example.com/app?sslrootcert=system" {}))]
+      (is (str/starts-with? problem "PGSSLMODE")))))
+
+(deftest database-url-parameters-the-collector-ignores-are-named
+  (is (= ["channel_binding" "connect_timeout"]
+         (:ignored-url-params (url-config "postgresql://u@h/app?sslmode=require&channel_binding=require&connect_timeout=10&channel_binding=disable"
+                                          {}))))
+  (is (= [] (:ignored-url-params (url-config "postgresql://u@h/app" {})))))

@@ -4,6 +4,10 @@
 
 (def ^:private ^Pattern dollar-quote-tag #"\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$")
 
+(def ^:private ^Pattern digit-groups #"[0-9]+(?:[ -][0-9]+)*")
+
+(def ^:private ascii-digit? (set "0123456789"))
+
 (def ^:private string-prefixes {"e" true "b" false "x" false "n" false})
 
 (defn- char-at [^String s i]
@@ -50,6 +54,39 @@
             close (.indexOf s tag (.end m))]
         (if (neg? close) (.length s) (+ close (count tag)))))))
 
+(defn- luhn-digit [i d]
+  (if (odd? i)
+    (let [doubled (* 2 d)] (if (> doubled 9) (- doubled 9) doubled))
+    d))
+
+(defn- luhn? [^String digits]
+  (let [sum (->> (reverse digits)
+                 (map #(Character/digit (char %) 10))
+                 (map-indexed luhn-digit)
+                 (reduce +))]
+    (zero? (mod sum 10))))
+
+(defn- digit-runs [groups]
+  (for [from (range (count groups))
+        run  (->> (subvec groups from) (reductions str) (take-while #(<= (count %) 19)))]
+    run))
+
+(defn- luhn-number? [^String text]
+  (some #(and (<= 10 (count %)) (luhn? %))
+        (digit-runs (str/split text #"[ -]"))))
+
+(defn- number-token [^String s i]
+  (let [m (doto (.matcher digit-groups s) (.region (int i) (.length s)))]
+    (.lookingAt m)
+    [(if (luhn-number? (.group m)) :literal :keep) (.end m)]))
+
+(defn- luhn-numbers-between [^String s start end]
+  (let [m (doto (.matcher digit-groups s) (.region (int start) (int end)))]
+    (loop [spans []]
+      (if (.find m)
+        (recur (cond-> spans (luhn-number? (.group m)) (conj [(.start m) (.end m)])))
+        spans))))
+
 (defn- word-token [^String s i]
   (let [end  (identifier-end s i)
         word (str/lower-case (subs s i end))]
@@ -65,23 +102,31 @@
 (defn- token [^String s i]
   (let [c    (char-at s i)
         next (char-at s (inc i))]
-    (cond (and (= \- c) (= \- next)) [:keep (line-end s i)]
-          (and (= \/ c) (= \* next)) [:keep (block-comment-end s i)]
+    (cond (and (= \- c) (= \- next)) [:comment (line-end s i)]
+          (and (= \/ c) (= \* next)) [:comment (block-comment-end s i)]
           (= \" c)                   [:keep (quoted-end s i \" false)]
           (= \' c)                   [:literal (quoted-end s i \' false)]
           (= \$ c)                   (if-let [end (dollar-quote-end s i)] [:literal end] [:keep (inc i)])
+          (ascii-digit? c)           (number-token s i)
           (identifier-start? c)      (word-token s i)
           :else                      [:keep (inc i)])))
 
-(defn- segments [^String s]
-  (loop [i 0 kept-from 0 out []]
+(defn- literal-spans [^String s]
+  (loop [i 0 spans []]
     (if (>= i (.length s))
-      (conj out (subs s kept-from))
-      (let [[kind end] (token s i)
-            end        (long end)]
-        (if (= :literal kind)
-          (recur end end (conj out (subs s kept-from i) ::literal))
-          (recur end kept-from out))))))
+      spans
+      (let [[kind end] (token s i)]
+        (recur (long end) (case kind
+                            :literal (conj spans [i end])
+                            :comment (into spans (luhn-numbers-between s i end))
+                            spans))))))
+
+(defn- segments [^String s]
+  (let [[out kept-from] (reduce (fn [[out kept-from] [start end]]
+                                  [(conj out (subs s kept-from start) ::literal) end])
+                                [[] 0]
+                                (literal-spans s))]
+    (conj out (subs s kept-from))))
 
 (defn- highest-parameter [kept]
   (reduce max 0 (for [part kept

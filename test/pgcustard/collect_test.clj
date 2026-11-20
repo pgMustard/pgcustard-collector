@@ -2,7 +2,9 @@
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
-            [pgcustard.collect :as collect]))
+            [pgcustard.collect :as collect]
+            [pgcustard.collector-fixtures :refer [connection-from-url test-postgres-url]]
+            [pgcustard.postgres :as postgres]))
 
 (deftest capture-fetches-more-than-it-stores
   (testing "headroom keeps excluded entries visible so they can be readmitted"
@@ -72,3 +74,48 @@
                                       {:queryid 2 :query nil}])]
     (is (= [{:queryid 1 :query "alter role alice password $1"} {:queryid 2 :query nil}]
            (#'collect/query-texts :read-db true [1 2])))))
+
+(defn- by-table-in [schema rows]
+  (into {}
+        (comp (filter #(= schema (:schema_name %)))
+              (map (juxt :table_name identity)))
+        rows))
+
+(deftest a-locked-table-is-skipped-rather-than-waited-for
+  (if-not test-postgres-url
+    (is (nil? (System/getenv "CI")) "CI needs PGCUSTARD_TEST_POSTGRES_URL")
+    (let [db-spec (postgres/data-source (connection-from-url test-postgres-url))
+          schema  (str "lock_test_" (System/nanoTime))]
+      (try
+        (doseq [sql [(str "create schema " schema)
+                     (str "create table " schema ".locked (id int primary key)")
+                     (str "create table " schema ".free (id int primary key)")
+                     (str "create table " schema ".parted (id int) partition by range (id)")
+                     (str "create table " schema ".part_locked partition of " schema ".parted for values from (0) to (10)")
+                     (str "create table " schema ".part_free partition of " schema ".parted for values from (10) to (20)")]]
+          (jdbc/execute! db-spec [sql]))
+        (jdbc/with-db-transaction [holder db-spec]
+          (jdbc/execute! holder [(str "lock table " schema ".locked, " schema ".part_locked in access exclusive mode")])
+          (with-open [connection (jdbc/get-connection db-spec)]
+            (let [read-db {:connection connection}
+                  _       (collect/configure-session! read-db)
+                  tables  (by-table-in schema (:sizes (collect/tables read-db)))
+                  indexes (by-table-in schema (collect/indexes read-db))]
+              (testing "the locked table is marked, without sizes"
+                (is (true? (get-in tables ["locked" :locked])))
+                (is (every? nil? (map (tables "locked") [:heap_bytes :index_bytes :toast_bytes]))))
+              (testing "its index is marked, without a size or definition"
+                (is (true? (get-in indexes ["locked" :locked])))
+                (is (nil? (get-in indexes ["locked" :index_bytes])))
+                (is (nil? (get-in indexes ["locked" :index_def]))))
+              (testing "a partitioned table with a locked partition is marked, without sizes"
+                (is (true? (get-in tables ["parted" :locked])))
+                (is (nil? (get-in tables ["parted" :heap_bytes]))))
+              (testing "other tables are measured as usual"
+                (is (false? (get-in tables ["free" :locked])))
+                (is (some? (get-in tables ["free" :heap_bytes])))
+                (is (some? (get-in indexes ["free" :index_def])))
+                (is (false? (get-in tables ["part_free" :locked])))
+                (is (some? (get-in tables ["part_free" :heap_bytes])))))))
+        (finally
+          (jdbc/execute! db-spec [(str "drop schema if exists " schema " cascade")]))))))

@@ -10,7 +10,9 @@
 
 (def ^:private default-port 5432)
 
-(def ^:private allowed-ssl-modes #{"disable" "require" "verify-ca" "verify-full"})
+(def ^:private ssl-modes ["verify-full" "verify-ca" "require" "disable"])
+
+(def ^:private allowed-ssl-modes (set ssl-modes))
 
 (def ^:private verifying-ssl-modes #{"verify-ca" "verify-full"})
 
@@ -44,8 +46,6 @@
     (integer? port) port
     :else           (try (Integer/parseInt (str/trim (str port)))
                          (catch NumberFormatException _ nil))))
-
-(def ^:private ssl-modes (vec (sort allowed-ssl-modes)))
 
 (defn- endpoint-issues [{:keys [host port database user]}]
   (let [parsed-port (port-number port)]
@@ -108,7 +108,7 @@
     [:sslmode :invalid]                  (str "sslmode must be one of " (str/join ", " ssl-modes))
     [:sslmode :verify-ca-needs-root]     "verify-ca needs an sslrootcert naming the issuer to trust"
     [:sslrootcert :empty]                "sslrootcert is set but empty"
-    [:sslrootcert :needs-verifying-mode] (str "sslrootcert needs sslmode " (str/join " or " (sort verifying-ssl-modes)))
+    [:sslrootcert :needs-verifying-mode] (str "sslrootcert needs sslmode " (str/join " or " (filter verifying-ssl-modes ssl-modes)))
     [:sslrootcert :unreadable]           (str "sslrootcert is not a readable file: " value)))
 
 (defn endpoint-problems [connection]
@@ -158,16 +158,19 @@
                                          (str "sslrootcert=" (url-encode (root-certificate-file sslrootcert)))]))
 
 (defn jdbc-url [{:keys [host port database] :as connection}
-                {:keys [socket-timeout-s statement-timeout-ms extra-params]
+                {:keys [socket-timeout-s statement-timeout-ms settings extra-params]
                  :or   {socket-timeout-s default-socket-timeout-s}}]
-  (str "jdbc:postgresql://" (url-host host) ":" (port-number port) "/" database
-       "?" (str/join "&" (cond-> (into [(str "connectTimeout=" connect-timeout-s)
-                                        (str "socketTimeout=" socket-timeout-s)
-                                        "ApplicationName=pgcustard"
-                                        "tcpKeepAlive=true"]
-                                       (concat (ssl-params connection) extra-params))
-                           statement-timeout-ms
-                           (conj (str "options=" (url-encode (str "-c statement_timeout=" statement-timeout-ms))))))))
+  (let [settings (cond-> settings
+                   statement-timeout-ms (assoc "statement_timeout" statement-timeout-ms))]
+    (str "jdbc:postgresql://" (url-host host) ":" (port-number port) "/" database
+         "?" (str/join "&" (cond-> (into [(str "connectTimeout=" connect-timeout-s)
+                                          (str "socketTimeout=" socket-timeout-s)
+                                          "ApplicationName=pgcustard"
+                                          "tcpKeepAlive=true"]
+                                         (concat (ssl-params connection) extra-params))
+                             (seq settings)
+                             (conj (str "options=" (url-encode (str/join " " (for [[setting value] settings]
+                                                                                 (str "-c " setting "=" value)))))))))))
 
 (defn data-source
   ([connection] (data-source connection {}))

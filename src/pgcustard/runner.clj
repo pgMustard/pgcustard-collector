@@ -33,14 +33,66 @@
 (defn- log-level [setting]
   (some-> setting str/lower-case log-levels keyword))
 
-(defn- connection-from-env [env]
-  {:host        (env "PGHOST")
-   :port        (env "PGPORT")
-   :database    (env "PGDATABASE")
-   :user        (env "PGUSER")
-   :password    (env "PGPASSWORD")
-   :sslmode     (env "PGSSLMODE")
-   :sslrootcert (env "PGSSLROOTCERT")})
+(def ^:private connection-env-names
+  {:host        "PGHOST"
+   :port        "PGPORT"
+   :database    "PGDATABASE"
+   :user        "PGUSER"
+   :password    "PGPASSWORD"
+   :sslmode     "PGSSLMODE"
+   :sslrootcert "PGSSLROOTCERT"})
+
+(def ^:private database-url-scheme #"(?i)\Apostgres(?:ql)?://")
+
+(def ^:private database-url-params {"sslmode" :sslmode "sslrootcert" :sslrootcert})
+
+(defn- percent-decode [^String s]
+  (try (java.net.URLDecoder/decode (str/replace s "+" "%2B") "UTF-8")
+       (catch IllegalArgumentException _ s)))
+
+(defn- split-at-first [s sep]
+  (if-let [i (str/index-of s sep)]
+    [(subs s 0 i) (subs s (inc i))]
+    [s nil]))
+
+(defn- host-and-port [hostspec]
+  (if-let [[_ host port] (re-matches #"\[([^\]]*)\](?::(.*))?" hostspec)]
+    [host port]
+    (split-at-first hostspec ":")))
+
+(defn- query-params [query]
+  (for [pair  (str/split (or query "") #"&")
+        :when (not (str/blank? pair))
+        :let  [[k v] (split-at-first pair "=")]]
+    [(percent-decode k) (percent-decode (or v ""))]))
+
+(defn- parse-database-url [url]
+  (if-let [scheme (re-find database-url-scheme url)]
+    (let [after-scheme     (subs url (count scheme))
+          at            (str/last-index-of after-scheme "@")
+          [user password]  (when at (split-at-first (subs after-scheme 0 at) ":"))
+          [location query] (split-at-first (if at (subs after-scheme (inc at)) after-scheme) "?")
+          [hostspec path]  (split-at-first location "/")
+          [host port]      (host-and-port hostspec)
+          params           (query-params query)]
+      {:settings (cond-> (into {} (for [[k v] params :when (database-url-params k)] [(database-url-params k) v]))
+                   (seq host) (assoc :host (percent-decode host))
+                   (seq port) (assoc :port port)
+                   (seq path) (assoc :database (percent-decode path))
+                   (seq user) (assoc :user (percent-decode user))
+                   password   (assoc :password (percent-decode password)))
+       :ignored  (into [] (comp (map first) (remove database-url-params) (distinct)) params)})
+    {:issue :scheme}))
+
+(defn- connection-settings [env]
+  (let [url                              (env "PGCUSTARD_DATABASE_URL")
+        from-env                         (update-vals connection-env-names env)
+        {:keys [settings ignored issue]} (when-not (str/blank? url) (parse-database-url url))]
+    {:connection         (merge from-env settings)
+     :from-database-url  (set (keys settings))
+     :set-twice          (filterv #(not (str/blank? (from-env %))) (sort (keys settings)))
+     :database-url-issue issue
+     :ignored-url-params (or ignored [])}))
 
 (def ^:private ignored-libpq-settings
   ["PGHOSTADDR" "PGSERVICE" "PGSERVICEFILE" "PGOPTIONS" "PGAPPNAME" "PGCONNECT_TIMEOUT" "PGCLIENTENCODING"
@@ -79,17 +131,17 @@
         tokens   (token-settings env)
         url      (str/replace (or (env "PGCUSTARD_URL") default-url) #"/+$" "")
         proxy    (proxy-setting env)]
-    {:mode             mode
-     :connection       (connection-from-env env)
-     :ignored-settings (filterv #(not (str/blank? (env %))) ignored-libpq-settings)
-     :url              url
-     :proxy-setting    proxy
-     :proxy            (proxy-for url proxy)
-     :token-settings   tokens
-     :token            (resolved-token tokens)
-     :mode-dir         mode-dir
-     :payloads         (some-> mode-dir (io/file "payloads"))
-     :log-level        (env "PGCUSTARD_LOG_LEVEL")}))
+    (merge (connection-settings env)
+           {:mode             mode
+            :ignored-settings (filterv #(not (str/blank? (env %))) ignored-libpq-settings)
+            :url              url
+            :proxy-setting    proxy
+            :proxy            (proxy-for url proxy)
+            :token-settings   tokens
+            :token            (resolved-token tokens)
+            :mode-dir         mode-dir
+            :payloads         (some-> mode-dir (io/file "payloads"))
+            :log-level        (env "PGCUSTARD_LOG_LEVEL")})))
 
 (defn- sends-securely? [url]
   (let [^URI uri (try (URI. url) (catch Exception _ nil))]
@@ -97,26 +149,51 @@
                   (or (= "https" (.getScheme uri))
                       (and (= "http" (.getScheme uri)) (local-hosts (.getHost uri))))))))
 
-(defn- connection-problem [{:keys [setting issue value]}]
-  (case [setting issue]
-    [:host :not-set]                     "PGHOST isn't set"
-    [:host :invalid]                     "PGHOST isn't a hostname or IP address"
-    [:port :invalid]                     "PGPORT isn't a number from 1 to 65535"
-    [:database :not-set]                 "PGDATABASE isn't set"
-    [:database :invalid]                 "PGDATABASE can only contain letters, digits, and _ $ . -"
-    [:user :not-set]                     "PGUSER isn't set"
-    [:sslmode :not-set]                  "PGSSLMODE isn't set (it must be disable, require, verify-ca, or verify-full)"
-    [:sslmode :invalid]                  "PGSSLMODE must be disable, require, verify-ca, or verify-full"
-    [:sslmode :verify-ca-needs-root]     "PGSSLMODE verify-ca needs PGSSLROOTCERT set to the certificate authority to trust"
-    [:sslrootcert :empty]                "PGSSLROOTCERT is set but empty"
-    [:sslrootcert :needs-verifying-mode] "PGSSLROOTCERT needs PGSSLMODE verify-ca or verify-full"
-    [:sslrootcert :unreadable]           (str "PGSSLROOTCERT isn't a readable file: " value)))
+(def ^:private database-url-parts
+  {:host        "the host"
+   :port        "the port"
+   :database    "the database name"
+   :user        "the user"
+   :password    "the password"
+   :sslmode     "sslmode"
+   :sslrootcert "sslrootcert"})
+
+(defn- connection-problem [from-database-url {:keys [setting issue value]}]
+  (let [named (fn [k] (if (from-database-url k)
+                        (str (database-url-parts k) " in PGCUSTARD_DATABASE_URL")
+                        (connection-env-names k)))]
+    (case [setting issue]
+      [:host :not-set]                     "PGHOST isn't set"
+      [:host :invalid]                     (str (named :host) " isn't a hostname or IP address")
+      [:port :invalid]                     (str (named :port) " isn't a number from 1 to 65535")
+      [:database :not-set]                 "PGDATABASE isn't set"
+      [:database :invalid]                 (str (named :database) " can only contain letters, digits, and _ $ . -")
+      [:user :not-set]                     "PGUSER isn't set"
+      [:sslmode :not-set]                  "PGSSLMODE isn't set (it must be verify-full, verify-ca, require, or disable)"
+      [:sslmode :invalid]                  (str (named :sslmode) " must be verify-full, verify-ca, require, or disable")
+      [:sslmode :verify-ca-needs-root]     (str (if (from-database-url :sslmode)
+                                                  "sslmode verify-ca in PGCUSTARD_DATABASE_URL"
+                                                  "PGSSLMODE verify-ca")
+                                                " needs PGSSLROOTCERT set to the certificate authority to trust")
+      [:sslrootcert :empty]                (str (named :sslrootcert) " is set but empty")
+      [:sslrootcert :needs-verifying-mode] (str (named :sslrootcert) " needs "
+                                                (if (from-database-url :sslmode) "sslmode" "PGSSLMODE")
+                                                " verify-full or verify-ca")
+      [:sslrootcert :unreadable]           (str (named :sslrootcert) " isn't a readable file: " value))))
+
+(defn- database-url-problems [{:keys [connection from-database-url set-twice database-url-issue]}]
+  (if database-url-issue
+    ["PGCUSTARD_DATABASE_URL must start with postgres:// or postgresql://"]
+    (into (mapv #(str "PGCUSTARD_DATABASE_URL and " (connection-env-names %) " both set " (database-url-parts %))
+                set-twice)
+          (map #(connection-problem from-database-url %))
+          (postgres/connection-issues connection))))
 
 (defn- token-problem [{:keys [env file from-file]}]
   (let [env?  (not (str/blank? env))
         file? (not (str/blank? file))]
     (cond
-      (and env? file?)           "PGCUSTARD_TOKEN and PGCUSTARD_TOKEN_FILE are both set, so the collector can't tell which token to use"
+      (and env? file?)           "PGCUSTARD_TOKEN and PGCUSTARD_TOKEN_FILE are both set"
       env?                       nil
       (not file?)                "neither PGCUSTARD_TOKEN nor PGCUSTARD_TOKEN_FILE is set"
       (= ::unreadable from-file) (str "PGCUSTARD_TOKEN_FILE isn't a readable file: " file)
@@ -128,8 +205,8 @@
     :credentials (str name " includes a username or password, which the collector can't use")
     nil))
 
-(defn config-problems [{:keys [mode connection url token-settings proxy-setting] :as config}]
-  (cond-> (mapv connection-problem (postgres/connection-issues connection))
+(defn config-problems [{:keys [mode url token-settings proxy-setting] :as config}]
+  (cond-> (database-url-problems config)
     (and (not (str/blank? (:log-level config))) (nil? (log-level (:log-level config))))
     (conj "PGCUSTARD_LOG_LEVEL must be info, warn, or error")
 
@@ -263,6 +340,8 @@
   (let [ctx (config #(System/getenv %) mode)]
     (doseq [setting (:ignored-settings ctx)]
       (log/warn (str setting " is set, but the collector doesn't read it, so it has no effect")))
+    (doseq [param (:ignored-url-params ctx)]
+      (log/warn (str "PGCUSTARD_DATABASE_URL includes " param ", but the collector doesn't read it, so it has no effect")))
     (when-let [problems (seq (config-problems ctx))]
       (apply exit! 2 problems))
     ctx))

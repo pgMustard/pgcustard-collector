@@ -40,6 +40,26 @@
   (is (= "/* a /* nested */ row's */ select $1" (literals/redact "/* a /* nested */ row's */ select 'x'")))
   (is (= "/*action='show'*/ select $2 where a = $1" (literals/redact "/*action='show'*/ select 'x' where a = $1"))))
 
+(deftest luhn-numbers-are-redacted
+  (testing "in comments, with or without separators"
+    (is (= "/* card $2 */ select $1" (literals/redact "/* card 4111111111111111 */ select $1")))
+    (is (= "select 1 -- $1\nfrom t" (literals/redact "select 1 -- 4111 1111 1111 1111\nfrom t")))
+    (is (= "/* $1 */ select 1" (literals/redact "/* 3782-822463-10005 */ select 1")))
+    (is (= "/* $1 */ select 1" (literals/redact "/* 4111111110 */ select 1"))))
+  (testing "as unquoted numbers"
+    (is (= "call charge($1, $2)" (literals/redact "call charge(4111111111111111, 'x')"))))
+  (testing "with the digits beside them"
+    (is (= "/* $1 */ select 1" (literals/redact "/* 4111111111111111 123 */ select 1")))
+    (is (= "/* $1 */ select 1" (literals/redact "/* 2024-4111111111111111 */ select 1")))))
+
+(deftest other-numbers-are-kept
+  (doseq [text ["/* 4111111111111112 */ select 1"
+                "select 1 -- 411111115"
+                "select 41111111111111111111 from t"
+                "select 1-- 4111111111111112"
+                "select t4111111111111111, \"4111111111111111\" from t"]]
+    (is (identical? text (literals/redact text)))))
+
 (deftest an-unterminated-literal-redacts-the-rest
   (is (= "select $1" (literals/redact "select 'abc, secret")))
   (is (= "do $1" (literals/redact "do $$ begin perform 'secret';"))))

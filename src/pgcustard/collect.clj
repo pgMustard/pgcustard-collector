@@ -128,9 +128,19 @@
 (def ^:private ignored-schema-list
   (str "(" (str/join ", " (map #(str "'" % "'") ignored-schemas)) ")"))
 
+(def ^:private exclusive-locks-cte
+  "exclusive_locks as materialized (
+     select coalesce(array_agg(distinct l.relation), '{}'::oid[]) as relations
+       from pg_locks l
+      where l.locktype = 'relation'
+        and l.mode = 'AccessExclusiveLock'
+        and l.database = (select oid from pg_database where datname = current_database())
+   )")
+
 (def table-size-query
   (str
-   "select s.schemaname                                           as schema_name,
+   "with " exclusive-locks-cte "
+   select s.schemaname                                           as schema_name,
           s.relname                                              as table_name,
           c.relkind::text                                        as relkind,
           sz.live_tuples                                         as rows_estimate,
@@ -154,9 +164,11 @@
           sz.toast_main_bytes,
           sz.toast_live_tuples,
           sz.catalog_rows,
-          sz.toast_catalog_rows
+          sz.toast_catalog_rows,
+          coalesce(sz.locked, false)                             as locked
      from pg_stat_user_tables s
      join pg_class c on c.oid = s.relid
+     cross join exclusive_locks
      left join lateral (
        select pn.nspname as parent_schema, pc.relname as parent_table
          from pg_inherits inh
@@ -167,18 +179,27 @@
      ) parent on true
      cross join lateral (
        select case when c.relkind = 'p'
-                   then (select coalesce(array_agg(pt.relid), '{}'::oid[])
-                           from pg_partition_tree(s.relid) pt
-                          where pt.isleaf)
+                   then (with recursive descendants (oid) as (
+                           select inh.inhrelid from pg_inherits inh where inh.inhparent = s.relid
+                           union all
+                           select inh.inhrelid
+                             from pg_inherits inh
+                             join descendants d on inh.inhparent = d.oid
+                         )
+                         select coalesce(array_agg(d.oid), '{}'::oid[])
+                           from descendants d
+                           join pg_class dc on dc.oid = d.oid
+                          where dc.relkind <> 'p')
                    else array[s.relid]
               end as oids
      ) tree
      cross join lateral (
-       select sum(r.index_bytes)                            as index_bytes,
-              sum(r.toast_bytes)                            as toast_bytes,
-              sum(r.main_bytes + r.other_fork_bytes)        as heap_bytes,
-              sum(r.main_bytes)                             as heap_main_bytes,
-              sum(coalesce(r.toast_main_bytes, 0))          as toast_main_bytes,
+       select bool_or(r.locked)                             as locked,
+              case when not bool_or(r.locked) then sum(r.index_bytes) end as index_bytes,
+              case when not bool_or(r.locked) then sum(r.toast_bytes) end as toast_bytes,
+              case when not bool_or(r.locked) then sum(r.main_bytes + r.other_fork_bytes) end as heap_bytes,
+              case when not bool_or(r.locked) then sum(r.main_bytes) end as heap_main_bytes,
+              case when not bool_or(r.locked) then sum(coalesce(r.toast_main_bytes, 0)) end as toast_main_bytes,
               sum(pg_stat_get_live_tuples(r.oid)) filter (where r.relkind <> 'f') as live_tuples,
               sum(pg_stat_get_live_tuples(r.reltoastrelid)) as toast_live_tuples,
               case when bool_or(r.reltuples < 0) then null
@@ -188,14 +209,25 @@
                    else sum(coalesce(r.toast_reltuples, 0)::numeric)::bigint
               end                                           as toast_catalog_rows
          from (select m.oid, m.relkind, m.reltuples, m.reltoastrelid, tc.reltuples as toast_reltuples,
-                      pg_indexes_size(m.oid)                  as index_bytes,
-                      pg_total_relation_size(m.reltoastrelid) as toast_bytes,
-                      pg_relation_size(m.oid)                 as main_bytes,
-                      pg_relation_size(m.oid, 'fsm') + pg_relation_size(m.oid, 'vm')
-                        + pg_relation_size(m.oid, 'init')     as other_fork_bytes,
-                      pg_relation_size(m.reltoastrelid)       as toast_main_bytes
+                      x.locked,
+                      case when not x.locked then pg_indexes_size(m.oid) end                  as index_bytes,
+                      case when not x.locked then pg_total_relation_size(m.reltoastrelid) end as toast_bytes,
+                      case when not x.locked then pg_relation_size(m.oid) end                 as main_bytes,
+                      case when not x.locked
+                           then pg_relation_size(m.oid, 'fsm') + pg_relation_size(m.oid, 'vm')
+                                + pg_relation_size(m.oid, 'init')
+                      end                                                                     as other_fork_bytes,
+                      case when not x.locked then pg_relation_size(m.reltoastrelid) end       as toast_main_bytes
                  from pg_class m
                  left join pg_class tc on tc.oid = m.reltoastrelid
+                 cross join lateral (
+                   select m.oid = any (exclusive_locks.relations)
+                          or m.reltoastrelid = any (exclusive_locks.relations)
+                          or exists (select 1
+                                       from pg_index i
+                                      where i.indrelid in (m.oid, m.reltoastrelid)
+                                        and i.indexrelid = any (exclusive_locks.relations)) as locked
+                 ) x
                 where m.oid = any (tree.oids)) r
      ) sz
     where s.schemaname not in " ignored-schema-list))
@@ -239,10 +271,12 @@
 
 (def index-metrics-query
   (str
-   "select s.schemaname                   as schema_name,
+   "with " exclusive-locks-cte "
+    select s.schemaname                   as schema_name,
            s.relname                      as table_name,
            s.indexrelname                 as index_name,
-           pg_relation_size(s.indexrelid) as index_bytes,
+           x.locked,
+           case when not x.locked then pg_relation_size(s.indexrelid) end as index_bytes,
            s.idx_scan,
            s.idx_tup_read,
            s.idx_tup_fetch,
@@ -263,23 +297,28 @@
                 else ci.reltuples::bigint
            end                            as catalog_rows,
            (ci.relam = (select oid from pg_am where amname = 'btree')) as is_btree,
-           array_to_string(array(
+           case when not x.locked then array_to_string(array(
              select pg_get_indexdef(s.indexrelid, k, false)
              from generate_series(1, ix.indnkeyatts) k
-           ), E'\n') as key_columns,
+           ), E'\n') end as key_columns,
            array_to_string(array(
              select concat_ws(' ', ix.indcollation[k - 1], ix.indclass[k - 1], ix.indoption[k - 1])
              from generate_series(1, ix.indnkeyatts) k
            ), E'\n') as key_options,
-           array_to_string(array(
+           case when not x.locked then array_to_string(array(
              select pg_get_indexdef(s.indexrelid, k, false)
              from generate_series(ix.indnkeyatts + 1, ix.indnatts) k
-           ), E'\n') as included_columns,
-           pg_get_expr(ix.indpred, ix.indrelid) as index_predicate,
-           pg_get_indexdef(s.indexrelid) as index_def
+           ), E'\n') end as included_columns,
+           case when not x.locked then pg_get_expr(ix.indpred, ix.indrelid) end as index_predicate,
+           case when not x.locked then pg_get_indexdef(s.indexrelid) end as index_def
     from pg_stat_user_indexes s
     join pg_index ix on ix.indexrelid = s.indexrelid
     join pg_class ci on ci.oid = s.indexrelid
+    cross join exclusive_locks
+    cross join lateral (
+      select s.indexrelid = any (exclusive_locks.relations)
+             or s.relid = any (exclusive_locks.relations) as locked
+    ) x
     left join pg_stat_progress_create_index p on p.index_relid = s.indexrelid
     left join pg_stat_all_tables st on st.relid = s.relid
     left join (
@@ -406,8 +445,11 @@
 
 (def ^:private statement-timeout-ms 15000)
 
+(def ^:private lock-timeout-ms 5000)
+
 (def ^:private session-settings-query
   (str "select set_config('statement_timeout', '" statement-timeout-ms "', false),
+          set_config('lock_timeout', '" lock-timeout-ms "', false),
           set_config('search_path',
                      concat_ws(', ', nullif(s.reset_val, ''),
                                (select e.extnamespace::regnamespace::text
