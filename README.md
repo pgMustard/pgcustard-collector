@@ -34,7 +34,7 @@ docker run -d --name pgcustard-collector --restart unless-stopped \
 `docker logs pgcustard-collector` should show something like:
 
 ```
-INFO pgCustard collector 0.1.1 started, collecting from db.internal:5432/app every 30s and sending to https://app.pgcustard.com
+INFO pgCustard collector 0.1.2 started, collecting from db.internal:5432/app every 30s and sending to https://app.pgcustard.com
 INFO collected in 812ms, 1 sent, 0 waiting
 ```
 
@@ -85,7 +85,7 @@ To see what it would send over time, `dry-run` collects every 30s like `run`, bu
 
 These steps limit what the collector can reach, and let you check what it sends. They’re designed to suit any database, including ones in scope for things like PCI DSS and HIPAA.
 
-- **Network:** The collector needs a connection to your database and outbound HTTPS to app.pgcustard.com, and nothing inbound. We can’t connect to it, and our replies only say whether a payload was stored.
+- **Network:** The collector needs a connection to your database and outbound HTTPS to app.pgcustard.com, and nothing inbound. Our replies only say whether a payload was stored, or why not.
 - **Encryption:** Set `PGSSLMODE` to `verify-full`.
 - **Database role:** Give the collector a role of its own, with `pg_monitor` and nothing else, so it can read statistics but not the data in your tables. Allow it only from the collector’s address in `pg_hba.conf`, for example `hostssl app pgcustard 10.0.5.20/32 scram-sha-256`. The collector keeps one connection open and only reads, so these are safe:
 
@@ -95,13 +95,26 @@ These steps limit what the collector can reach, and let you check what it sends.
   ```
 
 - **Query text:** Consider setting `pg_stat_statements.track_utility` to `off`. Utility statements, like `COPY` or `ALTER`, can include unquoted values that `pg_stat_statements` leaves in.
-- **The image:** Pin it by digest (`quay.io/pgcustard/collector@sha256:…`), and treat upgrades as reviewed changes, or [build it yourself](#development). It runs as a non-root user.
+- **The image:** Pin it by digest (`quay.io/pgcustard/collector@sha256:…`), and treat upgrades as reviewed changes. You can [verify it was built from this code](#verifying-the-image), or [build it yourself](#development). It runs as a non-root user, and has no shell.
 - **Secrets:** Pass the password and token as files (`PGPASSFILE`, `PGCUSTARD_TOKEN_FILE`) rather than as environment variables. A token can only send metrics for one database, and you can revoke it from that database’s Collector tokens.
 - **Before you switch it on:** Run `dry-run` for a day or two, and review the payloads before switching to `run`.
 
 ## If pgCustard can’t be reached
 
 Payloads wait in `/data` and are sent oldest first once the connection is working again. Payloads over 7 days old are deleted, and so are the oldest ones when they take up more than 1GB in total.
+
+## Verifying the image
+
+To verify that a published image was built from this code, rebuild it with Docker and compare the digests:
+
+```bash
+version=0.1.2
+git clone --branch "v$version" https://github.com/pgmustard/pgcustard-collector.git
+pgcustard-collector/build-image.sh
+docker buildx imagetools inspect "quay.io/pgcustard/collector:$version"
+```
+
+If the digest `build-image.sh` prints at the end matches the last command’s `Digest` line, the image was built from this code.
 
 ## Development
 

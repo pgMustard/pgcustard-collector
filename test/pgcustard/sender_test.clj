@@ -62,7 +62,7 @@
 
 (deftest anything-else-keeps-the-payloads-and-pauses-sending
   (doseq [reply [(refused 400 "unsupported_payload_version") (refused 401 "invalid_token")
-                 (refused 403 "not_accepting") (refused 415 "gzip_required")
+                 (refused 403 "not_subscribed") (refused 415 "gzip_required")
                  (refused 425 "ahead_of_server_clock") [429 "<html>Too many requests</html>"]
                  (refused 500 "server_error") [503 ""]
                  [200 "<html>Welcome</html>"] (stored "something_else")]]

@@ -262,8 +262,14 @@
         (= "invalid_token" code)
         (reply :error "pgCustard doesn't recognise the token (it may have been revoked), so payloads will be kept until it's replaced")
 
-        (= "not_accepting" code)
-        (reply :error "pgCustard isn't accepting metrics for this database (monitoring may be off, or the subscription may have ended), so payloads are being kept in case sending can resume later")
+        (= "monitoring_off" code)
+        (reply :error "monitoring is off for this database in pgCustard, so payloads are being kept in case it's switched on")
+
+        (= "not_subscribed" code)
+        (reply :warn "pgCustard recognises the token, but your organisation hasn't subscribed yet, so payloads are being kept to send once it does")
+
+        (= "subscription_inactive" code)
+        (reply :error "your organisation's pgCustard subscription isn't active, so payloads are being kept in case it's restarted")
 
         (= "ahead_of_server_clock" code)
         (reply :warn "this machine's clock is over a minute ahead of pgCustard's, so the payload will be resent soon")

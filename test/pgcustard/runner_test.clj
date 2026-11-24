@@ -180,7 +180,9 @@
 
 (deftest a-sending-problem-that-needs-a-person-is-an-error
   (doseq [[result level] [[{:status 401 :code "invalid_token"} :error]
-                          [{:status 403 :code "not_accepting"} :error]
+                          [{:status 403 :code "monitoring_off"} :error]
+                          [{:status 403 :code "subscription_inactive"} :error]
+                          [{:status 403 :code "not_subscribed"} :warn]
                           [{:status 400 :code "unsupported_payload_version"} :error]
                           [{:status 200} :error]
                           [{:status 425 :code "ahead_of_server_clock"} :warn]
