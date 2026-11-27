@@ -8,12 +8,11 @@ licensed.
 pgsql-bloat-estimation
 https://github.com/ioguix/pgsql-bloat-estimation
 
-pgCustard's table and index bloat estimation queries are derived from
-table/table_bloat.sql and btree/btree_bloat.sql. They have been modified:
-per-column widths are taken from the system catalogs rather than from pg_stats,
-the page-count and percentage arithmetic is performed in the application rather
-than in SQL, and results are aggregated across the partitions of a partitioned
-table.
+The queries that collect column widths for pgCustard's table and index bloat
+estimates are derived from table/table_bloat.sql and btree/btree_bloat.sql. They
+have been modified: widths are taken from the system catalogs rather than from
+pg_stats, and the estimates are calculated by the pgCustard app rather than by
+these queries.
 
 Copyright (c) 2015-2019, Jehan-Guillaume (ioguix) de Rorthais
 All rights reserved.
@@ -252,6 +251,8 @@ Apache License 2.0
 https://www.apache.org/licenses/LICENSE-2.0
 
   org.clj-commons/pretty 3.6.3
+  Guava's Murmur3 (included in org.clojure/clojure 1.12.7)
+    Copyright (C) 2011 The Guava Authors
 
 Eclipse Public License 1.0
 https://www.eclipse.org/legal/epl-v10.html
@@ -279,6 +280,12 @@ https://opensource.org/license/bsd-2-clause
     Copyright (c) 2019 OnGres, Inc.
   org.postgresql/postgresql 42.7.15
     Copyright (c) 1997, PostgreSQL Global Development Group
+
+BSD 3-Clause License
+https://asm.ow2.io/license.html
+
+  ASM (included in org.clojure/clojure 1.12.7)
+    Copyright (c) 2000-2011 INRIA, France Telecom
 
 --------------------------------------------------------------------------------
 Licence texts
@@ -713,3 +720,35 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+----------------------------------------
+
+BSD 3-Clause License (ASM)
+
+ASM: a very small and fast Java bytecode manipulation framework
+Copyright (c) 2000-2011 INRIA, France Telecom
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. Neither the name of the copyright holders nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+THE POSSIBILITY OF SUCH DAMAGE.

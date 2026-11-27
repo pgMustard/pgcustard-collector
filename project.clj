@@ -1,4 +1,4 @@
-(defproject pgcustard-collector "0.1.2"
+(defproject pgcustard-collector "0.1.3"
   :license {:name "Apache-2.0" :url "https://www.apache.org/licenses/LICENSE-2.0"}
   :main ^:skip-aot pgcustard.runner
 
